@@ -166,6 +166,28 @@ func (sp *scrapePool) stop() {
 	wg.Wait()
 }
 
+func specializeClient(cfg *config.ScrapeConfig, existing *http.Client, t *Target) *http.Client {
+	token := t.labels.Get("__bearer_token__")
+	username := t.labels.Get("__basic_auth_username__")
+	password := t.labels.Get("__basic_auth_password__")
+	if len(token) > 0 {
+		newconfig := cfg.HTTPClientConfig
+		newconfig.BearerToken = config.Secret(token)
+		client, _ := httputil.NewClientFromConfig(newconfig)
+		return client
+	}
+	if len(username) > 0 && len(password) > 0 {
+		newconfig := cfg.HTTPClientConfig
+		newconfig.BasicAuth = &config.BasicAuth{
+			Username: string(username),
+			Password: config.Secret(password),
+		}
+		client, _ := httputil.NewClientFromConfig(newconfig)
+		return client
+	}
+	return existing
+}
+
 // reload the scrape pool with the given scrape configuration. The target state is preserved
 // but all scrape loops are restarted with the new scrape configuration.
 // This method returns after all scrape loops that were stopped have stopped scraping.
@@ -190,9 +212,11 @@ func (sp *scrapePool) reload(cfg *config.ScrapeConfig) {
 	)
 
 	for fp, oldLoop := range sp.loops {
+		// allow selective override of the client
+		t := sp.targets[fp]
+
 		var (
-			t       = sp.targets[fp]
-			s       = &targetScraper{Target: t, client: sp.client, timeout: timeout}
+			s       = &targetScraper{Target: t, client: specializeClient(sp.config, sp.client, t), timeout: timeout}
 			newLoop = sp.newLoop(sp.ctx, s,
 				func() storage.Appender {
 					return sp.sampleAppender(t)
@@ -262,7 +286,7 @@ func (sp *scrapePool) sync(targets []*Target) {
 		uniqueTargets[hash] = struct{}{}
 
 		if _, ok := sp.targets[hash]; !ok {
-			s := &targetScraper{Target: t, client: sp.client, timeout: timeout}
+			s := &targetScraper{Target: t, client: specializeClient(sp.config, sp.client, t), timeout: timeout}
 			l := sp.newLoop(sp.ctx, s,
 				func() storage.Appender {
 					return sp.sampleAppender(t)
